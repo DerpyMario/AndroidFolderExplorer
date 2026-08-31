@@ -46,8 +46,10 @@
 name: Build (Windows 11 arm64 · VS 2026)
 
 on:
+  # Only master here: branch pushes are covered by the pull_request trigger, and
+  # listing both builds every push to a PR'd branch twice.
   push:
-    branches: ['master', 'claude/**']
+    branches: ['master']
     paths-ignore: ['**.md', 'dev/**', 'LICENSE']
   pull_request:
     branches: ['master']
