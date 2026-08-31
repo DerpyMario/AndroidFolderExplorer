@@ -1,0 +1,448 @@
+# ==============================================================================
+# AndroidFolderExplorer — CI build on Windows 11 arm64 with Visual Studio 2026
+# ==============================================================================
+#
+# Runner
+#   `windows-11-vs2026-arm` — Windows 11 25H2 arm64, Visual Studio Enterprise
+#   2026 (v18, C:\Program Files\Microsoft Visual Studio\18\Enterprise).
+#   GitHub is also rolling VS 2026 into the plain `windows-11-arm` label
+#   (21–30 Sep 2026); either label is usable via the `runner` dispatch input.
+#   Both are free for public repositories.
+#
+# ------------------------------------------------------------------------------
+# ARM64 compatibility — why the JDK is x86-64 by default
+# ------------------------------------------------------------------------------
+#   * Gradle runs natively on Windows/ARM64 only from Gradle 9.2.0 onwards.
+#     This project is pinned to Gradle 8.9 (gradle/wrapper/gradle-wrapper.properties)
+#     because AGP 8.5.2 does not support Gradle 9.x. On an aarch64 JVM there is
+#     no windows-aarch64 native-platform library for Gradle 8.9, and Gradle
+#     crashes as soon as it reads the Windows registry (JDK / VS discovery).
+#   * Running that same Gradle 8.9 on an x86-64 JDK makes Gradle load its amd64
+#     native-platform DLLs, which Windows 11 on ARM executes through its
+#     built-in x64 emulation (Prism). This is the supported path today.
+#   * The rest of the Android toolchain is x86-64-only on Windows regardless of
+#     the JDK, and runs emulated either way:
+#       - aapt2 is published only as `com.android.tools.build:aapt2:<ver>:windows`
+#       - SDK build-tools ship x86-64 executables (zipalign, aidl, split-select)
+#     Expect roughly 1.5–2x the wall-clock of an equivalent x64 runner.
+#   * `java_arch: aarch64` is exposed for experimentation — e.g. after a future
+#     Gradle 9.2+ / AGP upgrade. It is expected to fail on Gradle 8.9.
+#
+#   The Windows arm64 image ships no Android SDK and no JDK 17, so this workflow
+#   installs both (SDK is cached between runs).
+#
+# ------------------------------------------------------------------------------
+# Release signing
+# ------------------------------------------------------------------------------
+#   app/build.gradle.kts points `signingConfigs.release` at keys/release.keystore,
+#   which is .gitignore'd and therefore absent in CI. This workflow materialises it:
+#     * from the `RELEASE_KEYSTORE_BASE64` repository secret when set —
+#       the keystore must use the alias/passwords hard-coded in app/build.gradle.kts;
+#     * otherwise it generates a throw-away CI key so the release variant still
+#       compiles and R8 still runs. Those APKs are build verification only and
+#       must not be distributed — see docs/CI_WINDOWS_ARM64.md.
+# ==============================================================================
+
+name: Build (Windows 11 arm64 · VS 2026)
+
+# Manual only: Actions -> this workflow -> "Run workflow", or
+# `gh workflow run build-windows11-arm64-vs2026.yml --ref <branch>`.
+# Dispatching against a non-default branch works (verified on this file's own
+# feature branch before it was merged).
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner label (windows-11-vs2026-arm pins VS 2026)'
+        type: choice
+        default: 'windows-11-vs2026-arm'
+        options:
+          - 'windows-11-vs2026-arm'
+          - 'windows-11-arm'
+      java_version:
+        description: 'JDK feature version (17 matches AGP 8.5.2 / README)'
+        type: choice
+        default: '17'
+        options: ['17', '21']
+      java_arch:
+        description: 'JDK architecture — x64 runs emulated and is required by Gradle 8.9'
+        type: choice
+        default: 'x64'
+        options: ['x64', 'aarch64']
+      build_release:
+        description: 'Also assemble the minified release variant'
+        type: boolean
+        default: true
+      require_vs2026:
+        description: 'Fail the job if Visual Studio 2026 (v18) is not on the runner'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # Manual runs are deliberate — queue them rather than cancelling one another.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Short, space-free SDK path — keeps Windows MAX_PATH headroom for KSP/Compose output.
+  ANDROID_HOME: C:\android-sdk
+  ANDROID_SDK_ROOT: C:\android-sdk
+  # cmdline-tools 19.0. Deliberately NOT `latest`: from cmdline-tools 23.0 the
+  # `sdkmanager` script is a deprecation shim that forwards to the new Android
+  # CLI, which changes argument handling and licence flow. Pinning keeps a real
+  # sdkmanager. Bump together with the cache key.
+  CMDLINE_TOOLS_ZIP: commandlinetools-win-13114758_latest.zip
+  # compileSdk 35 (app/build.gradle.kts); build-tools 34.0.0 is AGP 8.5.2's default.
+  ANDROID_PLATFORMS: platforms;android-35
+  ANDROID_BUILD_TOOLS_1: build-tools;34.0.0
+  ANDROID_BUILD_TOOLS_2: build-tools;35.0.0
+
+jobs:
+  build:
+    name: assemble (${{ inputs.java_arch }} JDK ${{ inputs.java_version }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      # Compose + KSP + Hilt generate deep output paths; opt in before checkout.
+      - name: Enable git long paths
+        run: git config --global core.longpaths true
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Report host
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          $cs = Get-CimInstance Win32_ComputerSystem
+          Write-Host "OS              : $($os.Caption) $($os.Version)"
+          Write-Host "OS architecture : $($os.OSArchitecture)"
+          Write-Host "Processor arch  : $env:PROCESSOR_ARCHITECTURE"
+          Write-Host "Logical CPUs    : $($cs.NumberOfLogicalProcessors)"
+          Write-Host "RAM (GB)        : $([math]::Round($cs.TotalPhysicalMemory / 1GB, 1))"
+          Write-Host "Free disk (GB)  : $([math]::Round((Get-PSDrive C).Free / 1GB, 1))"
+
+      - name: Locate Visual Studio 2026
+        id: vs
+        env:
+          REQUIRE_VS2026: ${{ inputs.require_vs2026 }}
+        run: |
+          $vswhereCandidates = @(
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe",
+            "$env:ProgramFiles\Microsoft Visual Studio\Installer\vswhere.exe"
+          )
+          $vswhere = $vswhereCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          $name = 'not found'; $version = ''; $path = ''
+          if ($vswhere) {
+            $instance = & $vswhere -latest -prerelease -products '*' -format json | ConvertFrom-Json | Select-Object -First 1
+            if ($instance) {
+              $name    = $instance.displayName
+              $version = $instance.installationVersion
+              $path    = $instance.installationPath
+            }
+          }
+
+          Write-Host "vswhere        : $(if ($vswhere) { $vswhere } else { 'not found' })"
+          Write-Host "Visual Studio  : $name"
+          Write-Host "Version        : $version"
+          Write-Host "Install path   : $path"
+
+          $major = if ($version) { [int]($version.Split('.')[0]) } else { 0 }
+          $isVs2026 = $major -ge 18
+
+          "name=$name"       | Out-File $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File $env:GITHUB_OUTPUT -Append
+          "path=$path"       | Out-File $env:GITHUB_OUTPUT -Append
+          "is_vs2026=$($isVs2026.ToString().ToLower())" | Out-File $env:GITHUB_OUTPUT -Append
+
+          if (-not $isVs2026) {
+            $msg = "Visual Studio 2026 (v18.x) was not found on this runner (found: '$name' $version)."
+            if ($env:REQUIRE_VS2026 -eq 'true') {
+              Write-Host "::error::$msg Pin runs-on to 'windows-11-vs2026-arm', or re-run with require_vs2026 = false."
+              exit 1
+            }
+            Write-Host "::warning::$msg"
+          }
+          # The Gradle/Android build itself needs no MSVC toolchain — this project
+          # has no NDK/CMake sources. The check documents the image the APKs came
+          # from and guards native work added later.
+
+      # Defender scanning of the Gradle caches is a large tax on an emulated build.
+      - name: Exclude build directories from Defender (best effort)
+        continue-on-error: true
+        run: |
+          foreach ($p in @($env:GITHUB_WORKSPACE, "$env:USERPROFILE\.gradle", $env:ANDROID_SDK_ROOT)) {
+            try { Add-MpPreference -ExclusionPath $p -ErrorAction Stop; Write-Host "excluded: $p" }
+            catch { Write-Host "::notice::could not exclude $p — $($_.Exception.Message)" }
+          }
+
+      - name: Set up JDK ${{ inputs.java_version }} (${{ inputs.java_arch }})
+        uses: actions/setup-java@v5
+        with:
+          # Temurin publishes no Windows/aarch64 JDK 17 — Zulu does, so the
+          # aarch64 lane uses Zulu for both feature versions.
+          distribution: ${{ inputs.java_arch == 'x64' && 'temurin' || 'zulu' }}
+          java-version: ${{ inputs.java_version }}
+          architecture: ${{ inputs.java_arch }}
+
+      - name: Verify JDK and warn on unsupported combinations
+        run: |
+          & "$env:JAVA_HOME\bin\java.exe" -version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "JAVA_HOME: $env:JAVA_HOME"
+
+          $wrapperProps = Get-Content 'gradle/wrapper/gradle-wrapper.properties' -Raw
+          $gradleVersion = [regex]::Match($wrapperProps, 'gradle-([0-9]+(?:\.[0-9]+)+)-').Groups[1].Value
+          Write-Host "Gradle wrapper: $gradleVersion"
+          "GRADLE_WRAPPER_VERSION=$gradleVersion" | Out-File $env:GITHUB_ENV -Append
+
+          $arch = "${{ inputs.java_arch }}"
+          if ($arch -eq 'aarch64' -and [version]$gradleVersion -lt [version]'9.2') {
+            Write-Host "::warning::Gradle $gradleVersion has no windows-aarch64 native-platform library. Gradle supports Windows on ARM natively only from 9.2.0, so this run is expected to fail on registry access. Use java_arch = x64 (emulated) with Gradle 8.9."
+          }
+          # Gradle 8.9 tops out at JDK 22; JDK 23 on the image would be rejected.
+          $javaMajor = [int]"${{ inputs.java_version }}"
+          if ($javaMajor -gt 22 -and [version]$gradleVersion -lt [version]'8.10') {
+            Write-Host "::warning::Gradle $gradleVersion does not support JDK $javaMajor."
+          }
+
+      - name: Cache Android SDK
+        id: sdk-cache
+        uses: actions/cache@v5
+        with:
+          path: C:\android-sdk
+          # Keep the key free of ';' by naming the packages explicitly; bump it
+          # alongside ANDROID_PLATFORMS / ANDROID_BUILD_TOOLS_* below.
+          key: android-sdk-${{ runner.os }}-arm64-${{ env.CMDLINE_TOOLS_ZIP }}-p35-bt34.0.0-bt35.0.0
+
+      - name: Install Android SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          # The Windows arm64 image ships no Android SDK, so install command-line
+          # tools from scratch. sdkmanager is pure Java and runs on either JDK arch.
+          New-Item -ItemType Directory -Force -Path $env:ANDROID_SDK_ROOT | Out-Null
+          $zip = Join-Path $env:RUNNER_TEMP 'cmdline-tools.zip'
+          $url = "https://dl.google.com/android/repository/$env:CMDLINE_TOOLS_ZIP"
+          Write-Host "Downloading $url"
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+
+          $extract = Join-Path $env:RUNNER_TEMP 'cmdline-tools-extract'
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
+          New-Item -ItemType Directory -Force -Path "$env:ANDROID_SDK_ROOT\cmdline-tools" | Out-Null
+          # The archive contains a top-level `cmdline-tools` folder; sdkmanager
+          # requires it to sit at cmdline-tools\latest.
+          Move-Item -Path "$extract\cmdline-tools" -Destination "$env:ANDROID_SDK_ROOT\cmdline-tools\latest"
+
+          $sdkmanager = "$env:ANDROID_SDK_ROOT\cmdline-tools\latest\bin\sdkmanager.bat"
+
+          # Accept licences from a file rather than a pipe — piping into a .bat
+          # wrapper can hang waiting on stdin.
+          $yes = Join-Path $env:RUNNER_TEMP 'licences.txt'
+          Set-Content -Path $yes -Value ((1..50 | ForEach-Object { 'y' }) -join "`r`n")
+          $licenceRun = Start-Process -FilePath $sdkmanager `
+            -ArgumentList "--sdk_root=$env:ANDROID_SDK_ROOT", '--licenses' `
+            -RedirectStandardInput $yes -NoNewWindow -Wait -PassThru
+          Write-Host "sdkmanager --licenses exited with $($licenceRun.ExitCode)"
+
+          # Package coordinates contain ';', which sdkmanager.bat's cmd tokenizer
+          # splits on unless the argument reaches it quoted — PowerShell only
+          # auto-quotes arguments containing spaces, so quote them explicitly.
+          # Unquoted, 'platforms;android-35' arrives as 'platforms' + 'android-35'
+          # and sdkmanager reports both as not found.
+          $packages = @('platform-tools', $env:ANDROID_PLATFORMS,
+                        $env:ANDROID_BUILD_TOOLS_1, $env:ANDROID_BUILD_TOOLS_2)
+          $argList  = @("--sdk_root=$env:ANDROID_SDK_ROOT") +
+                      ($packages | ForEach-Object { '"' + $_ + '"' })
+          Write-Host "sdkmanager $($argList -join ' ')"
+          $installRun = Start-Process -FilePath $sdkmanager -ArgumentList $argList `
+            -NoNewWindow -Wait -PassThru
+          if ($installRun.ExitCode -ne 0) {
+            throw "sdkmanager failed with exit code $($installRun.ExitCode)"
+          }
+
+      # sdkmanager can report a package "not found" and still exit non-zero only
+      # at the very end, so assert the layout directly. Runs on cache hits too.
+      - name: Verify Android SDK
+        run: |
+          $platform = ($env:ANDROID_PLATFORMS      -split ';')[1]
+          $bt1      = ($env:ANDROID_BUILD_TOOLS_1  -split ';')[1]
+          $bt2      = ($env:ANDROID_BUILD_TOOLS_2  -split ';')[1]
+          $required = @(
+            "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe",
+            "$env:ANDROID_SDK_ROOT\platforms\$platform\android.jar",
+            "$env:ANDROID_SDK_ROOT\build-tools\$bt1",
+            "$env:ANDROID_SDK_ROOT\build-tools\$bt2"
+          )
+          $missing = $required | Where-Object { -not (Test-Path $_) }
+          if ($missing) {
+            throw "Android SDK is incomplete — missing:`n  " + ($missing -join "`n  ")
+          }
+          $required | ForEach-Object { Write-Host "ok  $_" }
+
+      - name: Configure SDK location
+        run: |
+          "$env:ANDROID_SDK_ROOT\platform-tools"           | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+          "$env:ANDROID_SDK_ROOT\cmdline-tools\latest\bin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+          # local.properties is .gitignore'd; AGP reads sdk.dir from it first.
+          "sdk.dir=$($env:ANDROID_SDK_ROOT -replace '\\', '/')" | Set-Content -Path 'local.properties' -Encoding ascii
+          Get-Content 'local.properties'
+
+      - name: Configure Gradle for CI
+        run: |
+          # GRADLE_USER_HOME properties win over the project's gradle.properties,
+          # so CI tuning stays out of the repository. The project's 2 GB heap is
+          # tight for KSP + Hilt + Compose on an emulated JVM.
+          $gradleHome = "$env:USERPROFILE\.gradle"
+          New-Item -ItemType Directory -Force -Path $gradleHome | Out-Null
+          @(
+            'org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8',
+            'kotlin.daemon.jvmargs=-Xmx3g',
+            'org.gradle.caching=true',
+            'org.gradle.console=plain'
+          ) | Set-Content -Path "$gradleHome\gradle.properties" -Encoding ascii
+          Get-Content "$gradleHome\gradle.properties"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-arm64-${{ inputs.java_arch }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', '**/*.gradle.kts') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-arm64-${{ inputs.java_arch }}-
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Assemble debug
+        run: |
+          .\gradlew.bat --no-daemon --stacktrace assembleDebug
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Unit tests
+        run: |
+          .\gradlew.bat --no-daemon --stacktrace testDebugUnitTest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Reported, not enforced: the project has no lint baseline yet, and
+      # abortOnError would turn pre-existing findings into a red first build.
+      - name: Android Lint (report only)
+        id: lint
+        continue-on-error: true
+        run: |
+          .\gradlew.bat --no-daemon --stacktrace lintDebug
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare release keystore
+        id: keystore
+        if: ${{ inputs.build_release }}
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          # signingConfigs.release in app/build.gradle.kts hard-codes the store
+          # path, alias and passwords; read them back rather than restating the
+          # credentials here, so this stays correct if the build file changes.
+          $buildFile  = Get-Content 'app/build.gradle.kts' -Raw
+          $alias      = [regex]::Match($buildFile, 'keyAlias\s*=\s*"([^"]+)"').Groups[1].Value
+          $storePass  = [regex]::Match($buildFile, 'storePassword\s*=\s*"([^"]+)"').Groups[1].Value
+          $keyPass    = [regex]::Match($buildFile, 'keyPassword\s*=\s*"([^"]+)"').Groups[1].Value
+          if (-not $alias -or -not $storePass -or -not $keyPass) {
+            throw 'Could not read signingConfigs.release from app/build.gradle.kts.'
+          }
+          Write-Host "::add-mask::$storePass"
+          Write-Host "::add-mask::$keyPass"
+
+          New-Item -ItemType Directory -Force -Path 'keys' | Out-Null
+          $keystore = Join-Path (Get-Location) 'keys\release.keystore'
+
+          if ($env:RELEASE_KEYSTORE_BASE64) {
+            [IO.File]::WriteAllBytes($keystore, [Convert]::FromBase64String($env:RELEASE_KEYSTORE_BASE64))
+            Write-Host 'Release keystore restored from the RELEASE_KEYSTORE_BASE64 secret.'
+            'origin=secret' | Out-File $env:GITHUB_OUTPUT -Append
+          } else {
+            & "$env:JAVA_HOME\bin\keytool.exe" -genkeypair -noprompt `
+              -keystore $keystore -storetype PKCS12 `
+              -alias $alias -storepass $storePass -keypass $keyPass `
+              -keyalg RSA -keysize 2048 -validity 10000 `
+              -dname 'CN=AndroidFolderExplorer CI, OU=CI, O=AndroidFolderExplorer, C=US'
+            if ($LASTEXITCODE -ne 0) { throw "keytool failed with exit code $LASTEXITCODE" }
+            Write-Host '::warning::No RELEASE_KEYSTORE_BASE64 secret is configured — the release APK is signed with a throw-away CI key and must not be distributed.'
+            'origin=ephemeral' | Out-File $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Assemble release
+        if: ${{ inputs.build_release }}
+        run: |
+          .\gradlew.bat --no-daemon --stacktrace assembleRelease
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Remove keystore
+        if: always()
+        run: Remove-Item -Recurse -Force 'keys' -ErrorAction SilentlyContinue
+
+      - name: Upload debug APK
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: apk-debug-${{ github.run_number }}
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+
+      - name: Upload release APK
+        if: ${{ inputs.build_release }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: apk-release-${{ steps.keystore.outputs.origin }}-${{ github.run_number }}
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: warn
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: lint-report-${{ github.run_number }}
+          path: |
+            app/build/reports/lint-results-debug.html
+            app/build/reports/lint-results-debug.xml
+          if-no-files-found: ignore
+
+      - name: Summary
+        if: always()
+        run: |
+          $rows = @(
+            "| Item | Value |",
+            "|---|---|",
+            "| Runner label | ``${{ inputs.runner }}`` |",
+            "| Host architecture | $env:PROCESSOR_ARCHITECTURE |",
+            "| Visual Studio | ${{ steps.vs.outputs.name }} (${{ steps.vs.outputs.version }}) |",
+            "| JDK | ${{ inputs.java_version }} / ${{ inputs.java_arch }}$(if ('${{ inputs.java_arch }}' -eq 'x64') { ' (emulated)' }) |",
+            "| Gradle | $env:GRADLE_WRAPPER_VERSION |",
+            "| Android SDK | $env:ANDROID_SDK_ROOT (cache hit: ${{ steps.sdk-cache.outputs.cache-hit == 'true' }}) |",
+            "| Lint | ${{ steps.lint.outcome }} |"
+          )
+          $rows -join "`n" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+
+          "`n### APKs`n" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          $apks = Get-ChildItem -Path 'app/build/outputs/apk' -Recurse -Filter '*.apk' -ErrorAction SilentlyContinue
+          if ($apks) {
+            foreach ($apk in $apks) {
+              "- ``$($apk.Name)`` — $([math]::Round($apk.Length / 1MB, 2)) MB" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            }
+          } else {
+            '- none produced' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+
+          if ('${{ steps.keystore.outputs.origin }}' -eq 'ephemeral') {
+            "`n> Release APK signed with a throw-away CI key — build verification only, not for distribution." | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
