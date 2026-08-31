@@ -45,10 +45,10 @@
 
 name: Build (Windows 11 arm64 · VS 2026)
 
-# Manual only. GitHub exposes the "Run workflow" button — and accepts the
-# dispatch API call — only for workflows present on the DEFAULT branch, so this
-# file must reach master before it can be dispatched. Once it is there, a run
-# can still target any branch via the ref picker.
+# Manual only: Actions -> this workflow -> "Run workflow", or
+# `gh workflow run build-windows11-arm64-vs2026.yml --ref <branch>`.
+# Dispatching against a non-default branch works (verified on this file's own
+# feature branch before it was merged).
 on:
   workflow_dispatch:
     inputs:

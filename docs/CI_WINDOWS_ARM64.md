@@ -13,11 +13,14 @@ runs on push or on a pull request.
 Actions → *Build (Windows 11 arm64 · VS 2026)* → **Run workflow**, then pick the
 branch and any inputs.
 
-> GitHub shows the *Run workflow* button — and accepts `POST /actions/workflows/
-> {id}/dispatches` — only for workflows that exist on the **default branch**.
-> Until this file is merged to `master` there is no button and the API returns
-> 404, even though the file is present on the feature branch. Once merged, a run
-> can still target any branch from the ref picker.
+> Dispatching from a non-default branch works: this workflow was dispatched
+> against its feature branch via `POST /actions/workflows/{id}/dispatches` with
+> `ref` set to that branch, and the run executed there, before anything was
+> merged to `master`.
+>
+> If the *Run workflow* button is not visible in the Actions UI for a branch
+> that has not been merged yet, use the API or `gh workflow run <file> --ref
+> <branch>` instead — the dispatch itself is not blocked.
 
 | Input | Default | Notes |
 |---|---|---|
