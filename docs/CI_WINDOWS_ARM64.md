@@ -52,8 +52,22 @@ Android toolchain on Windows is x86-64-only regardless of which JDK is used:
 - `aapt2` is published solely as `com.android.tools.build:aapt2:<version>:windows` (x86-64);
 - SDK build-tools ship x86-64 executables (`zipalign`, `aidl`, `split-select`).
 
-Those run emulated either way. Expect roughly 1.5–2× the wall-clock of an
-equivalent x64 runner.
+Those run emulated either way.
+
+Measured on the first green run (cold caches, no Gradle or SDK cache to restore),
+total 18m42s:
+
+| Step | Time |
+|---|---|
+| Install Android SDK | 43s |
+| `assembleDebug` | 8m31s |
+| `testDebugUnitTest` | 47s |
+| `lintDebug` | 2m08s |
+| `assembleRelease` (R8, minified) | 5m05s |
+
+Warm runs are faster — the SDK and the Gradle caches are both restored. No x64
+comparison run exists yet, so treat these as the emulated baseline rather than a
+measured slowdown factor.
 
 ### Trying the native aarch64 lane
 
