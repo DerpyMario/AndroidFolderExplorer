@@ -45,15 +45,11 @@
 
 name: Build (Windows 11 arm64 · VS 2026)
 
+# Manual only. GitHub exposes the "Run workflow" button — and accepts the
+# dispatch API call — only for workflows present on the DEFAULT branch, so this
+# file must reach master before it can be dispatched. Once it is there, a run
+# can still target any branch via the ref picker.
 on:
-  # Only master here: branch pushes are covered by the pull_request trigger, and
-  # listing both builds every push to a PR'd branch twice.
-  push:
-    branches: ['master']
-    paths-ignore: ['**.md', 'dev/**', 'LICENSE']
-  pull_request:
-    branches: ['master']
-    paths-ignore: ['**.md', 'dev/**', 'LICENSE']
   workflow_dispatch:
     inputs:
       runner:
@@ -86,8 +82,9 @@ permissions:
   contents: read
 
 concurrency:
+  # Manual runs are deliberate — queue them rather than cancelling one another.
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 env:
   # Short, space-free SDK path — keeps Windows MAX_PATH headroom for KSP/Compose output.
@@ -105,8 +102,8 @@ env:
 
 jobs:
   build:
-    name: assemble (${{ inputs.java_arch || 'x64' }} JDK ${{ inputs.java_version || '17' }})
-    runs-on: ${{ inputs.runner || 'windows-11-vs2026-arm' }}
+    name: assemble (${{ inputs.java_arch }} JDK ${{ inputs.java_version }})
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 90
     defaults:
       run:
@@ -134,7 +131,7 @@ jobs:
       - name: Locate Visual Studio 2026
         id: vs
         env:
-          REQUIRE_VS2026: ${{ (github.event_name != 'workflow_dispatch' || inputs.require_vs2026) && 'true' || 'false' }}
+          REQUIRE_VS2026: ${{ inputs.require_vs2026 }}
         run: |
           $vswhereCandidates = @(
             "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe",
@@ -186,14 +183,14 @@ jobs:
             catch { Write-Host "::notice::could not exclude $p — $($_.Exception.Message)" }
           }
 
-      - name: Set up JDK ${{ inputs.java_version || '17' }} (${{ inputs.java_arch || 'x64' }})
+      - name: Set up JDK ${{ inputs.java_version }} (${{ inputs.java_arch }})
         uses: actions/setup-java@v5
         with:
           # Temurin publishes no Windows/aarch64 JDK 17 — Zulu does, so the
           # aarch64 lane uses Zulu for both feature versions.
-          distribution: ${{ (inputs.java_arch || 'x64') == 'x64' && 'temurin' || 'zulu' }}
-          java-version: ${{ inputs.java_version || '17' }}
-          architecture: ${{ inputs.java_arch || 'x64' }}
+          distribution: ${{ inputs.java_arch == 'x64' && 'temurin' || 'zulu' }}
+          java-version: ${{ inputs.java_version }}
+          architecture: ${{ inputs.java_arch }}
 
       - name: Verify JDK and warn on unsupported combinations
         run: |
@@ -206,12 +203,12 @@ jobs:
           Write-Host "Gradle wrapper: $gradleVersion"
           "GRADLE_WRAPPER_VERSION=$gradleVersion" | Out-File $env:GITHUB_ENV -Append
 
-          $arch = "${{ inputs.java_arch || 'x64' }}"
+          $arch = "${{ inputs.java_arch }}"
           if ($arch -eq 'aarch64' -and [version]$gradleVersion -lt [version]'9.2') {
             Write-Host "::warning::Gradle $gradleVersion has no windows-aarch64 native-platform library. Gradle supports Windows on ARM natively only from 9.2.0, so this run is expected to fail on registry access. Use java_arch = x64 (emulated) with Gradle 8.9."
           }
           # Gradle 8.9 tops out at JDK 22; JDK 23 on the image would be rejected.
-          $javaMajor = [int]"${{ inputs.java_version || '17' }}"
+          $javaMajor = [int]"${{ inputs.java_version }}"
           if ($javaMajor -gt 22 -and [version]$gradleVersion -lt [version]'8.10') {
             Write-Host "::warning::Gradle $gradleVersion does not support JDK $javaMajor."
           }
@@ -319,9 +316,9 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-arm64-${{ inputs.java_arch || 'x64' }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', '**/*.gradle.kts') }}
+          key: gradle-${{ runner.os }}-arm64-${{ inputs.java_arch }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', '**/*.gradle.kts') }}
           restore-keys: |
-            gradle-${{ runner.os }}-arm64-${{ inputs.java_arch || 'x64' }}-
+            gradle-${{ runner.os }}-arm64-${{ inputs.java_arch }}-
 
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v4
@@ -347,7 +344,7 @@ jobs:
 
       - name: Prepare release keystore
         id: keystore
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_release }}
+        if: ${{ inputs.build_release }}
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
         run: |
@@ -383,7 +380,7 @@ jobs:
           }
 
       - name: Assemble release
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_release }}
+        if: ${{ inputs.build_release }}
         run: |
           .\gradlew.bat --no-daemon --stacktrace assembleRelease
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -401,7 +398,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload release APK
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_release }}
+        if: ${{ inputs.build_release }}
         uses: actions/upload-artifact@v6
         with:
           name: apk-release-${{ steps.keystore.outputs.origin }}-${{ github.run_number }}
@@ -426,10 +423,10 @@ jobs:
           $rows = @(
             "| Item | Value |",
             "|---|---|",
-            "| Runner label | ``${{ inputs.runner || 'windows-11-vs2026-arm' }}`` |",
+            "| Runner label | ``${{ inputs.runner }}`` |",
             "| Host architecture | $env:PROCESSOR_ARCHITECTURE |",
             "| Visual Studio | ${{ steps.vs.outputs.name }} (${{ steps.vs.outputs.version }}) |",
-            "| JDK | ${{ inputs.java_version || '17' }} / ${{ inputs.java_arch || 'x64' }}$(if ('${{ inputs.java_arch || 'x64' }}' -eq 'x64') { ' (emulated)' }) |",
+            "| JDK | ${{ inputs.java_version }} / ${{ inputs.java_arch }}$(if ('${{ inputs.java_arch }}' -eq 'x64') { ' (emulated)' }) |",
             "| Gradle | $env:GRADLE_WRAPPER_VERSION |",
             "| Android SDK | $env:ANDROID_SDK_ROOT (cache hit: ${{ steps.sdk-cache.outputs.cache-hit == 'true' }}) |",
             "| Lint | ${{ steps.lint.outcome }} |"

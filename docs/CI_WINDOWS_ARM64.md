@@ -5,6 +5,28 @@ Workflow: [`.github/workflows/build-windows11-arm64-vs2026.yml`](../.github/work
 Builds `assembleDebug` + `assembleRelease`, runs unit tests, reports Android Lint,
 and uploads the APKs (plus the R8 mapping file) as run artifacts.
 
+## Running it
+
+**Manual only** — the workflow has a single `workflow_dispatch` trigger. Nothing
+runs on push or on a pull request.
+
+Actions → *Build (Windows 11 arm64 · VS 2026)* → **Run workflow**, then pick the
+branch and any inputs.
+
+> GitHub shows the *Run workflow* button — and accepts `POST /actions/workflows/
+> {id}/dispatches` — only for workflows that exist on the **default branch**.
+> Until this file is merged to `master` there is no button and the API returns
+> 404, even though the file is present on the feature branch. Once merged, a run
+> can still target any branch from the ref picker.
+
+| Input | Default | Notes |
+|---|---|---|
+| `runner` | `windows-11-vs2026-arm` | or `windows-11-arm` |
+| `java_version` | `17` | or `21` |
+| `java_arch` | `x64` | `aarch64` is expected to fail on Gradle 8.9 — see below |
+| `build_release` | `true` | off = debug variant only |
+| `require_vs2026` | `true` | off = warn instead of failing when VS is not v18 |
+
 ---
 
 ## Runner
