@@ -67,7 +67,9 @@ future Gradle 9.2+ / AGP upgrade.
 | Gap | Handling |
 |---|---|
 | No JDK 17 on the image | `actions/setup-java` — Temurin for x64, Zulu for aarch64 |
-| No Android SDK | `cmdline-tools` downloaded to `C:\android-sdk`, licences accepted, `platform-tools` + `platforms;android-35` + `build-tools;34.0.0` and `35.0.0` installed, then cached |
+| No Android SDK | `cmdline-tools` downloaded to `C:\android-sdk`, licences accepted, `platform-tools` + `platforms;android-35` + `build-tools;34.0.0` and `35.0.0` installed, verified, then cached |
+| `sdkmanager` splitting package names | Package coordinates contain `;`, which `sdkmanager.bat`'s cmd tokenizer splits on unless the argument arrives quoted — PowerShell only auto-quotes arguments containing spaces. They are quoted explicitly and passed via `Start-Process`. |
+| cmdline-tools `latest` | Pinned to 19.0. From 23.0, `sdkmanager` is a deprecation shim forwarding to the new [Android CLI](https://d.android.com/tools/agents/android-cli), which changes argument handling and drops `--licenses`. |
 | Build-tools 34.0.0 | AGP 8.5.2's default `buildToolsVersion`; 35.0.0 matches `compileSdk 35` |
 | Deep KSP/Compose output paths | `git config --global core.longpaths true`, SDK at a short space-free path |
 | 2 GB heap in `gradle.properties` | CI-only override in `%USERPROFILE%\.gradle\gradle.properties` (4 GB Gradle, 3 GB Kotlin daemon, build cache on) — the repo's own properties are untouched |
@@ -118,6 +120,6 @@ turn pre-existing findings into a red first build. Once a baseline exists, drop
 
 | Pin | Where |
 |---|---|
-| `cmdline-tools` build number | `CMDLINE_TOOLS_ZIP` in the workflow `env:` — bump the SDK cache key with it |
+| `cmdline-tools` build number | `CMDLINE_TOOLS_ZIP` in the workflow `env:` — the cache key interpolates it, so it invalidates automatically. Moving to 23.0+ means adopting the Android CLI. |
 | Platform / build-tools | `ANDROID_PLATFORMS`, `ANDROID_BUILD_TOOLS_1/2` — bump the SDK cache key with them |
 | JDK | `java_version` input default |

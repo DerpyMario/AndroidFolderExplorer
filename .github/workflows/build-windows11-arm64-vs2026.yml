@@ -91,8 +91,11 @@ env:
   # Short, space-free SDK path — keeps Windows MAX_PATH headroom for KSP/Compose output.
   ANDROID_HOME: C:\android-sdk
   ANDROID_SDK_ROOT: C:\android-sdk
-  # cmdline-tools 23.0 (`cmdline-tools;latest`). Bump together with the cache key.
-  CMDLINE_TOOLS_ZIP: commandlinetools-win-16111833_latest.zip
+  # cmdline-tools 19.0. Deliberately NOT `latest`: from cmdline-tools 23.0 the
+  # `sdkmanager` script is a deprecation shim that forwards to the new Android
+  # CLI, which changes argument handling and licence flow. Pinning keeps a real
+  # sdkmanager. Bump together with the cache key.
+  CMDLINE_TOOLS_ZIP: commandlinetools-win-13114758_latest.zip
   # compileSdk 35 (app/build.gradle.kts); build-tools 34.0.0 is AGP 8.5.2's default.
   ANDROID_PLATFORMS: platforms;android-35
   ANDROID_BUILD_TOOLS_1: build-tools;34.0.0
@@ -113,7 +116,7 @@ jobs:
         run: git config --global core.longpaths true
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Report host
         run: |
@@ -182,7 +185,7 @@ jobs:
           }
 
       - name: Set up JDK ${{ inputs.java_version || '17' }} (${{ inputs.java_arch || 'x64' }})
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           # Temurin publishes no Windows/aarch64 JDK 17 — Zulu does, so the
           # aarch64 lane uses Zulu for both feature versions.
@@ -213,7 +216,7 @@ jobs:
 
       - name: Cache Android SDK
         id: sdk-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: C:\android-sdk
           # Keep the key free of ';' by naming the packages explicitly; bump it
@@ -250,11 +253,40 @@ jobs:
             -RedirectStandardInput $yes -NoNewWindow -Wait -PassThru
           Write-Host "sdkmanager --licenses exited with $($licenceRun.ExitCode)"
 
-          & $sdkmanager --sdk_root="$env:ANDROID_SDK_ROOT" `
-            'platform-tools' $env:ANDROID_PLATFORMS $env:ANDROID_BUILD_TOOLS_1 $env:ANDROID_BUILD_TOOLS_2
-          if ($LASTEXITCODE -ne 0) { throw "sdkmanager failed with exit code $LASTEXITCODE" }
+          # Package coordinates contain ';', which sdkmanager.bat's cmd tokenizer
+          # splits on unless the argument reaches it quoted — PowerShell only
+          # auto-quotes arguments containing spaces, so quote them explicitly.
+          # Unquoted, 'platforms;android-35' arrives as 'platforms' + 'android-35'
+          # and sdkmanager reports both as not found.
+          $packages = @('platform-tools', $env:ANDROID_PLATFORMS,
+                        $env:ANDROID_BUILD_TOOLS_1, $env:ANDROID_BUILD_TOOLS_2)
+          $argList  = @("--sdk_root=$env:ANDROID_SDK_ROOT") +
+                      ($packages | ForEach-Object { '"' + $_ + '"' })
+          Write-Host "sdkmanager $($argList -join ' ')"
+          $installRun = Start-Process -FilePath $sdkmanager -ArgumentList $argList `
+            -NoNewWindow -Wait -PassThru
+          if ($installRun.ExitCode -ne 0) {
+            throw "sdkmanager failed with exit code $($installRun.ExitCode)"
+          }
 
-          & $sdkmanager --sdk_root="$env:ANDROID_SDK_ROOT" --list_installed
+      # sdkmanager can report a package "not found" and still exit non-zero only
+      # at the very end, so assert the layout directly. Runs on cache hits too.
+      - name: Verify Android SDK
+        run: |
+          $platform = ($env:ANDROID_PLATFORMS      -split ';')[1]
+          $bt1      = ($env:ANDROID_BUILD_TOOLS_1  -split ';')[1]
+          $bt2      = ($env:ANDROID_BUILD_TOOLS_2  -split ';')[1]
+          $required = @(
+            "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe",
+            "$env:ANDROID_SDK_ROOT\platforms\$platform\android.jar",
+            "$env:ANDROID_SDK_ROOT\build-tools\$bt1",
+            "$env:ANDROID_SDK_ROOT\build-tools\$bt2"
+          )
+          $missing = $required | Where-Object { -not (Test-Path $_) }
+          if ($missing) {
+            throw "Android SDK is incomplete — missing:`n  " + ($missing -join "`n  ")
+          }
+          $required | ForEach-Object { Write-Host "ok  $_" }
 
       - name: Configure SDK location
         run: |
@@ -280,7 +312,7 @@ jobs:
           Get-Content "$gradleHome\gradle.properties"
 
       - name: Cache Gradle
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.gradle/caches
@@ -360,7 +392,7 @@ jobs:
 
       - name: Upload debug APK
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: apk-debug-${{ github.run_number }}
           path: app/build/outputs/apk/debug/*.apk
@@ -368,7 +400,7 @@ jobs:
 
       - name: Upload release APK
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_release }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: apk-release-${{ steps.keystore.outputs.origin }}-${{ github.run_number }}
           path: |
@@ -378,7 +410,7 @@ jobs:
 
       - name: Upload lint report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: lint-report-${{ github.run_number }}
           path: |
