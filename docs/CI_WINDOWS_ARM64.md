@@ -90,9 +90,20 @@ total 18m42s:
 | `lintDebug` | 2m08s |
 | `assembleRelease` (R8, minified) | 5m05s |
 
-Warm runs are faster — the SDK and the Gradle caches are both restored. No x64
-comparison run exists yet, so treat these as the emulated baseline rather than a
-measured slowdown factor.
+A warm run (both caches restored) took **7m43s** for the same work:
+
+| Step | Cold | Warm |
+|---|---|---|
+| Install Android SDK | 43s | skipped (cache hit) |
+| `assembleDebug` | 8m31s | 1m08s |
+| `testDebugUnitTest` | 47s | 42s |
+| `lintDebug` | 2m08s | 1m51s |
+| `assembleRelease` (R8, minified) | 5m05s | 1m36s |
+| **total** | **18m42s** | **7m43s** |
+
+The Gradle build cache (enabled for CI in `GRADLE_USER_HOME`) does most of that.
+No x64 comparison run exists, so treat these as the emulated baseline rather than
+a measured slowdown factor.
 
 ### Trying the native aarch64 lane
 
